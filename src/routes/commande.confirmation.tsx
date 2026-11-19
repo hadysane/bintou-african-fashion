@@ -8,8 +8,9 @@ import { useCart } from "@/lib/cart";
 import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/commande/confirmation")({
-  validateSearch: (search: Record<string, unknown>): { session_id?: string | undefined } => ({
+  validateSearch: (search: Record<string, unknown>): { session_id?: string | undefined; t?: string | undefined } => ({
     session_id: typeof search["session_id"] === "string" ? search["session_id"] : undefined,
+    t: typeof search["t"] === "string" ? search["t"] : undefined,
   }),
   head: () => ({
     meta: [
@@ -26,13 +27,13 @@ export const Route = createFileRoute("/commande/confirmation")({
 });
 
 function Confirmation() {
-  const { session_id } = Route.useSearch();
+  const { session_id, t } = Route.useSearch();
   const confirm = useServerFn(confirmCheckout);
   const { clear } = useCart();
   const { data, isLoading } = useQuery({
-    queryKey: ["confirm", session_id],
-    queryFn: () => confirm({ data: { sessionId: session_id! } }),
-    enabled: !!session_id,
+    queryKey: ["confirm", session_id, t],
+    queryFn: () => confirm({ data: { sessionId: session_id!, token: t! } }),
+    enabled: !!session_id && !!t,
     retry: 1,
   });
 
@@ -53,7 +54,7 @@ function Confirmation() {
           <CheckCircle2 className="mx-auto size-14 text-forest" />
           <h1 className="mt-6 text-5xl">Merci !</h1>
           <p className="mt-4 text-lg leading-relaxed text-muted-foreground">
-            Votre commande est confirmée.{data.email ? ` Un reçu a été envoyé à ${data.email}.` : ""} Nous préparons vos pièces avec soin.
+            Votre commande est confirmée. Nous préparons vos pièces avec soin.
           </p>
           <Button asChild variant="ink" size="lg" className="mt-10">
             <Link to="/boutique" search={{ cat: undefined }}>Continuer mes achats</Link>

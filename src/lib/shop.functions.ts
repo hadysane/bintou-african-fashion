@@ -1,29 +1,15 @@
 import { createServerFn } from "@tanstack/react-start";
-import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import type { Database, Json } from "@/integrations/supabase/types";
+import type { Json } from "@/integrations/supabase/types";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { stockKey, validateCart, type StockMap } from "./cart-logic";
 
 const SHIPPING_COUNTRIES = ["FR", "BE", "CH", "LU", "DE", "ES", "IT", "NL", "PT", "GB", "CA", "US", "SN", "CI", "ML", "CM", "GN"];
 
-function publicClient() {
-  const key = process.env["SUPABASE_PUBLISHABLE_KEY"]!;
-  return createClient<Database>(process.env["SUPABASE_URL"]!, key, {
-    auth: { persistSession: false, autoRefreshToken: false, storage: undefined },
-    global: {
-      fetch: (input, init) => {
-        const h = new Headers(init?.headers);
-        if (key.startsWith("sb_") && h.get("Authorization") === `Bearer ${key}`) h.delete("Authorization");
-        h.set("apikey", key);
-        return fetch(input, { ...init, headers: h });
-      },
-    },
-  });
-}
-
 async function readStock(): Promise<StockMap> {
-  const { data, error } = await publicClient().from("product_stock").select("product_slug, size, quantity");
+  // Stock rows are not readable directly by visitors; the server reads them and returns only quantities.
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data, error } = await supabaseAdmin.from("product_stock").select("product_slug, size, quantity");
   if (error) {
     console.error("[stock]", error.message);
     throw new Error("Stock indisponible");
@@ -31,6 +17,27 @@ async function readStock(): Promise<StockMap> {
   const map: StockMap = {};
   for (const row of data) map[stockKey(row.product_slug, row.size)] = row.quantity;
   return map;
+}
+
+function toHex(bytes: ArrayBuffer | Uint8Array): string {
+  return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  return toHex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+}
+
+const DEV_ORIGIN = /^https?:\/\/(localhost(:\d+)?|127\.0\.0\.1(:\d+)?|[a-z0-9-]+\.lovable\.app|[a-z0-9-]+\.lovableproject\.com)$/;
+
+/** Where Stripe sends shoppers back: always this site, never a caller-chosen host. */
+async function trustedOrigin(clientOrigin: string): Promise<string> {
+  const { getRequest } = await import("@tanstack/react-start/server");
+  const requestOrigin = new URL(getRequest().url).origin;
+  const host = new URL(requestOrigin).hostname;
+  if (host !== "localhost" && host !== "127.0.0.1") return requestOrigin;
+  // Local dev server behind the editor preview: only accept known preview hosts.
+  const candidate = new URL(clientOrigin).origin;
+  return DEV_ORIGIN.test(candidate) ? candidate : requestOrigin;
 }
 
 export const getStock = createServerFn({ method: "GET" }).handler(async () => readStock());
@@ -53,9 +60,15 @@ export const createCheckout = createServerFn({ method: "POST" })
     const { stripeRequest } = await import("./stripe.server");
     type Session = import("./stripe.server").StripeSession;
 
+    // Secret handed only to this buyer (in their return link) so only they can confirm the order.
+    const confirmToken = toHex(crypto.getRandomValues(new Uint8Array(32)));
     const { data: order, error } = await supabaseAdmin
       .from("orders")
-      .insert({ items: check.items as unknown as Json, amount_total: Math.round(check.total * 100) })
+      .insert({
+        items: check.items as unknown as Json,
+        amount_total: Math.round(check.total * 100),
+        confirm_token_hash: await sha256Hex(confirmToken),
+      })
       .select("id")
       .single();
     if (error || !order) {
@@ -63,13 +76,13 @@ export const createCheckout = createServerFn({ method: "POST" })
       return { error: "Impossible de créer la commande. Réessayez." };
     }
 
-    const origin = new URL(data.origin).origin;
+    const origin = await trustedOrigin(data.origin);
     const params: Record<string, string> = {
       mode: "payment",
       locale: "fr",
       client_reference_id: order.id,
       "metadata[order_id]": order.id,
-      success_url: `${origin}/commande/confirmation?session_id={CHECKOUT_SESSION_ID}`,
+      success_url: `${origin}/commande/confirmation?session_id={CHECKOUT_SESSION_ID}&t=${confirmToken}`,
       cancel_url: `${origin}/boutique`,
       "phone_number_collection[enabled]": "true",
     };
@@ -112,15 +125,32 @@ async function fulfillFromStripe(sessionId: string) {
   return session;
 }
 
-/** Called from the thank-you page: verifies the payment with Stripe, then records it. */
+/** Called from the thank-you page: requires the buyer's secret, verifies the payment with Stripe, then records it. */
 export const confirmCheckout = createServerFn({ method: "POST" })
-  .inputValidator((input: unknown) => z.object({ sessionId: z.string().regex(/^cs_[A-Za-z0-9_]+$/) }).parse(input))
-  .handler(async ({ data }) => {
+  .inputValidator((input: unknown) =>
+    z
+      .object({
+        sessionId: z.string().max(255).regex(/^cs_[A-Za-z0-9_]+$/),
+        token: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .parse(input),
+  )
+  .handler(async ({ data }): Promise<{ paid: boolean }> => {
     try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { data: order } = await supabaseAdmin
+        .from("orders")
+        .select("status, confirm_token_hash")
+        .eq("stripe_session_id", data.sessionId)
+        .maybeSingle();
+      if (!order?.confirm_token_hash || order.confirm_token_hash !== (await sha256Hex(data.token))) {
+        return { paid: false };
+      }
+      if (order.status !== "pending") return { paid: order.status === "paid" || order.status === "shipped" };
       const session = await fulfillFromStripe(data.sessionId);
-      return { paid: session.payment_status === "paid", email: session.customer_details?.email ?? null };
+      return { paid: session.payment_status === "paid" };
     } catch {
-      return { paid: false, email: null };
+      return { paid: false };
     }
   });
 

@@ -17,6 +17,7 @@ export type Database = {
       orders: {
         Row: {
           amount_total: number
+          confirm_token_hash: string | null
           created_at: string
           customer_email: string | null
           customer_name: string | null
@@ -29,6 +30,7 @@ export type Database = {
         }
         Insert: {
           amount_total: number
+          confirm_token_hash?: string | null
           created_at?: string
           customer_email?: string | null
           customer_name?: string | null
@@ -41,6 +43,7 @@ export type Database = {
         }
         Update: {
           amount_total?: number
+          confirm_token_hash?: string | null
           created_at?: string
           customer_email?: string | null
           customer_name?: string | null

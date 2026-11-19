@@ -32,3 +32,6 @@ use the editor.
 ## Project rules
 
 - Catalog lives in `src/lib/products.ts` (static data, no backend yet); cart state is client-side in `src/lib/cart.tsx` persisted to localStorage, with pure logic in `src/lib/cart-logic.ts` — keeps the shop working without a database or third-party store.
+- Team (admin) access is granted only via `team_invites` matched to a verified email (DB triggers); never auto-promote the first signup — open signup would let anyone claim the shop.
+- Order confirmation requires a per-order secret (hashed in `orders.confirm_token_hash`, raw value only in the buyer's Stripe success URL) and Stripe return URLs come from the request origin, not client input — prevents others confirming orders, reading buyer data, or redirecting shoppers.
+- `product_stock` is not readable by visitors directly; the storefront gets quantities from the `getStock` server function — keeps the table locked to the team.

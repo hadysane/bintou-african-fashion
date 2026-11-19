@@ -8,6 +8,13 @@
       "when": 1794706929687,
       "tag": "0000_stock_orders_team",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795093552990,
+      "tag": "0001_harden_team_access_and_stock",
+      "breakpoints": true
     }
   ]
 }
